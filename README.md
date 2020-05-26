@@ -16,4 +16,5 @@ npm install --save-dev @doist/prettier-config
 {
     // ...
     "prettier": "@doist/prettier-config"
-}```
+}
+```
