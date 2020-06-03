@@ -1,13 +1,13 @@
 {
-  "name": "@doist/prettier-config",
-  "version": "1.0.0",
-  "description": "> Doist global [prettier](https://prettier.io) config.",
-  "main": "index.json",
-  "repository": "git@github.com:doist/prettier-config.git",
-  "author": "David Miotti <davidm@doist.com>",
-  "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/Doist/prettier-config/issues"
-  },
-  "homepage": "https://github.com/Doist/prettier-config#readme"
+    "name": "@doist/prettier-config",
+    "version": "1.0.0",
+    "description": "> Doist global [prettier](https://prettier.io) config.",
+    "main": "index.json",
+    "repository": "git@github.com:doist/prettier-config.git",
+    "author": "David Miotti <davidm@doist.com>",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/Doist/prettier-config/issues"
+    },
+    "homepage": "https://github.com/Doist/prettier-config#readme"
 }
