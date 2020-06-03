@@ -22,7 +22,7 @@ npm install --save-dev @doist/prettier-config
 ## Release a new package
 
 ```
-npm version [major | minor | patch]
+npm version major
 npm publish
 git push
 ```
