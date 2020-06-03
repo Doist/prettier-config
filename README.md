@@ -21,7 +21,7 @@ npm install --save-dev @doist/prettier-config
 
 ## Release a new package
 
-This project use [sementic versioning](https://semver.org/).
+This project uses [sementic versioning](https://semver.org/).
 
 ```
 npm version major
