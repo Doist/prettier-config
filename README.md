@@ -14,7 +14,17 @@ npm install --save-dev @doist/prettier-config
 
 ```jsonc
 {
-    // ...
-    "prettier": "@doist/prettier-config"
+  // ...
+  "prettier": "@doist/prettier-config"
 }
+```
+
+## Release a new package
+
+This project uses [sementic versioning](https://semver.org/).
+
+```
+npm version major
+npm publish
+git push
 ```
