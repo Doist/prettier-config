@@ -9,5 +9,8 @@
     "bugs": {
         "url": "https://github.com/Doist/prettier-config/issues"
     },
-    "homepage": "https://github.com/Doist/prettier-config#readme"
+    "homepage": "https://github.com/Doist/prettier-config#readme",
+    "peerDependencies": {
+        "prettier": "^2.0.0"
+    }
 }
