@@ -21,10 +21,9 @@ npm install --save-dev @doist/prettier-config
 
 ## Release a new package
 
-This project uses [sementic versioning](https://semver.org/).
+This project uses [sementic versioning](https://semver.org/). A new version will be published to both npm and GitHub Package Registry when a new tag is pushed.
 
 ```
-npm version major
-npm publish
-git push
+npm version <major|minor|patch>
+git push origin --tags
 ```
