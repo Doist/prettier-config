@@ -1,3 +1,7 @@
+## 3.0.1 (July 7, 2020)
+
+* Published to npm [#10](https://github.com/Doist/prettier-config/pull/10)
+
 ## 3.0.0 (July 7, 2020)
 
 * Pinned `prettier` as a peer dependency at `^2.0.0` [#9](https://github.com/Doist/prettier-config/pull/9)
