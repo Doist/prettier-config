@@ -1,6 +1,6 @@
-## 3.0.1 (July 7, 2020)
+## 3.0.2 (July 7, 2020)
 
-* Published to npm [#10](https://github.com/Doist/prettier-config/pull/10)
+* Published to npm [#10](https://github.com/Doist/prettier-config/pull/10), [#11](https://github.com/Doist/prettier-config/pull/11)
 
 ## 3.0.0 (July 7, 2020)
 
