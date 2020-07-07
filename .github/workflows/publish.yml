@@ -16,11 +16,17 @@ jobs:
               with:
                   node-version: 12
                   registry-url: https://npm.pkg.github.com/
+                  scope: '@doist'
             - run: npm publish
               env:
                   NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
             # Publish to npm registry
-            - run: npm publish --@doist:registry=https://registry.npmjs.org/
+            - uses: actions/setup-node@v1
+              with:
+                  node-version: 12
+                  registry-url: https://registry.npmjs.org/
+                  scope: '@doist'
+            - run: npm publish
               env:
                   NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
