@@ -4,5 +4,13 @@
     "semi": false,
     "singleQuote": true,
     "trailingComma": "all",
-    "arrowParens": "always"
+    "arrowParens": "always",
+    "overrides": [
+        {
+            "files": "*.svg",
+            "options": {
+                "parser": "html"
+            }
+        }
+    ]
 }
