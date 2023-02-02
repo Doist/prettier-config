@@ -4,5 +4,14 @@
     "semi": false,
     "singleQuote": true,
     "trailingComma": "all",
-    "arrowParens": "always"
+    "arrowParens": "always",
+    "overrides": [
+        {
+          "files": ["*.yml", "*.yaml"],
+          "options": {
+            "tabWidth": 2,
+            "singleQuote": false
+          }
+        }
+    ]
 }
