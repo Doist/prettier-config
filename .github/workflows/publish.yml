@@ -1,6 +1,7 @@
 name: Release @doist/prettier-config package
 
 on:
+    workflow_dispatch:
     push:
         tags:
             - 'v*'
@@ -12,15 +13,15 @@ jobs:
         steps:
             - uses: actions/checkout@v2
 
-            # Publish to GitHub package registry
-            - uses: actions/setup-node@v1
-              with:
-                  node-version: 12
-                  registry-url: https://npm.pkg.github.com/
-                  scope: '@doist'
-            - run: npm publish
-              env:
-                  NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+            # # Publish to GitHub package registry
+            # - uses: actions/setup-node@v1
+            #   with:
+            #       node-version: 12
+            #       registry-url: https://npm.pkg.github.com/
+            #       scope: '@doist'
+            # - run: npm publish
+            #   env:
+            #       NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
             # Publish to npm registry
             - uses: actions/setup-node@v1
