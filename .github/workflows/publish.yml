@@ -17,35 +17,35 @@ jobs:
     publish:
         runs-on: ubuntu-latest
         timeout-minutes: 60
-    steps:
-        - name: Checkout
-          uses: actions/checkout@v4
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-        - name: Setup Node
-          uses: actions/setup-node@v3
-          with:
-              node-version: 24
+            - name: Setup Node
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 24
 
-        - name: Ensure npm 11.5.1 or later is installed
-          run: npm install -g npm@latest
+            - name: Ensure npm 11.5.1 or later is installed
+              run: npm install -g npm@latest
 
-        - name: Publish to GitHub Package Registry
-          uses: actions/setup-node@v3
-          with:
-              node-version: 24
-              registry-url: https://npm.pkg.github.com/
-              scope: '@doist'
-        - run: npm publish
-          env:
-              NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            - name: Publish to GitHub Package Registry
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 24
+                  registry-url: https://npm.pkg.github.com/
+                  scope: '@doist'
+            - run: npm publish
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-        - name: Clear npm config between GitHub/npm registries
-          run: rm -f $NPM_CONFIG_USERCONFIG
+            - name: Clear npm config between GitHub/npm registries
+              run: rm -f $NPM_CONFIG_USERCONFIG
 
-        - name: Publish to npm registry
-          uses: actions/setup-node@v3
-          with:
-              node-version: 24
-              registry-url: https://registry.npmjs.org/
-              scope: '@doist'
-        - run: npm publish --provenance --access public
+            - name: Publish to npm registry
+              uses: actions/setup-node@v3
+              with:
+                  node-version: 24
+                  registry-url: https://registry.npmjs.org/
+                  scope: '@doist'
+            - run: npm publish --provenance --access public
