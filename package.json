@@ -1,6 +1,6 @@
 {
     "name": "@doist/prettier-config",
-    "version": "4.0.0",
+    "version": "4.0.1",
     "description": "Doist global [prettier](https://prettier.io) config.",
     "main": "index.json",
     "repository": "https://github.com/Doist/prettier-config",
