@@ -94,7 +94,7 @@ export function pack(directory, sourceSha, sourceRef) {
 
 // A temporary cwd and explicit scope mapping prevent project/user npmrc routing leaks.
 // Never log config contents or token values. npm uses OIDC for npmjs, GITHUB_TOKEN for GitHub.
-export function withRegistry(destination, callback) {
+export function withRegistry(destination, callback, spawn = spawnSync) {
     assert.ok(Object.hasOwn(registries, destination), 'Unknown registry')
     if (destination === 'github')
         assert.ok(process.env.NODE_AUTH_TOKEN, 'GitHub package token is required')
@@ -102,7 +102,8 @@ export function withRegistry(destination, callback) {
     const directory = mkdtempSync(join(tmpdir(), 'prettier-config-publish-'))
     const env = Object.fromEntries(
         Object.entries(process.env).filter(
-            ([key]) => !/^(npm_config_|npm_token$|node_auth_token$)/i.test(key),
+            ([key]) =>
+                !/^(npm_config_|npm_token$|node_auth_token$|github_token$|gh_token$)/i.test(key),
         ),
     )
     env.NPM_CONFIG_USERCONFIG = join(directory, 'user.npmrc')
@@ -116,7 +117,8 @@ export function withRegistry(destination, callback) {
     writeFileSync(env.NPM_CONFIG_USERCONFIG, config, { mode: 0o600 })
     try {
         return callback(
-            (args) => spawnSync('npm', args, { cwd: directory, env, encoding: 'utf8' }),
+            (args, options = {}) =>
+                spawn('npm', args, { cwd: directory, env, encoding: 'utf8', ...options }),
             registry,
         )
     } finally {
@@ -126,7 +128,14 @@ export function withRegistry(destination, callback) {
 
 export function registryMetadata(run, registry, spec, field = 'dist') {
     const result = run(['view', spec, field, '--json', `--registry=${registry}`])
-    if (result.status === 0) return JSON.parse(result.stdout)
+    if (result.status === 0) {
+        const value = JSON.parse(result.stdout)
+        assert.ok(
+            value && typeof value === 'object' && !Array.isArray(value),
+            'Ambiguous registry metadata',
+        )
+        return value
+    }
     // Authentication, networking and other failures must not be mistaken for absence.
     let error
     try {
@@ -154,8 +163,23 @@ export function assertSameArtifact(dist, release) {
         )
 }
 
-export function publish(release, destination, run, registry, tag = 'latest') {
+// Both required registries must agree with the retained bytes before any destination writes.
+export function preflight(release, lookup) {
+    for (const destination of Object.keys(registries)) {
+        const existing = lookup(destination)
+        if (existing !== null) assertSameArtifact(existing, release)
+    }
+}
+
+function lookupCopy(release, destination) {
+    return withRegistry(destination, (run, registry) =>
+        registryMetadata(run, registry, `${release.name}@${release.version}`),
+    )
+}
+
+export function publish(release, destination, run, registry, tag = 'latest', options = {}) {
     assert.ok(['latest', 'recovery'].includes(tag), 'Expected latest or recovery dist-tag')
+    preflight(release, options.lookup ?? ((target) => lookupCopy(release, target)))
     const spec = `${release.name}@${release.version}`
     const existing = registryMetadata(run, registry, spec)
     if (existing) {
@@ -191,11 +215,19 @@ export function publish(release, destination, run, registry, tag = 'latest') {
     // The tarball comes from an earlier run; GITHUB_SHA would attest the publisher commit.
     // Disable even OIDC's automatic provenance rather than claim the wrong build source.
     if (destination === 'npm') args.push('--access=public', '--provenance=false')
-    const result = run(args)
+    const result = run(args, options.interactive ? { stdio: 'inherit' } : {})
     if (result.status !== 0)
         throw new Error(`Publish failed: ${result.stderr || result.error || result.stdout}`)
     assertSameArtifact(registryMetadata(run, registry, spec), release)
     console.log(`${destination}: verified ${spec}`)
+}
+
+// Operator-only: keep login credentials in the isolated npm config. Metadata stays captured;
+// publication inherits the terminal because npm may ask for fresh 2FA after login.
+export function bootstrap(release, run, registry, tag = 'latest', options = {}) {
+    const login = run(['login', `--registry=${registry}`], { stdio: 'inherit' })
+    assert.equal(login.status, 0, 'npm login failed')
+    publish(release, 'npm', run, registry, tag, { ...options, interactive: true })
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -204,10 +236,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         console.log(JSON.stringify(pack(directory, sourceSha, versionOrRef), null, 2))
     else if (command === 'verify')
         console.log(JSON.stringify(verify(directory, sourceSha, versionOrRef), null, 2))
-    else if (command === 'publish') {
+    else if (command === 'bootstrap') {
+        const release = verify(directory, sourceSha, versionOrRef)
+        withRegistry('npm', (run, registry) => bootstrap(release, run, registry, destination))
+    } else if (command === 'publish') {
         const release = verify(directory, sourceSha, versionOrRef)
         withRegistry(destination, (run, registry) =>
             publish(release, destination, run, registry, tag),
         )
-    } else throw new Error('Expected pack, verify or publish')
+    } else throw new Error('Expected pack, verify, bootstrap or publish')
 }

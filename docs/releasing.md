@@ -65,27 +65,29 @@ Run the verifier from the reviewed checkout. Back up the **original downloaded t
 
 ## First real npm publication: interactive, then exact GitHub mirror
 
-The authorized maintainer uses Node 24 and npm 11.21.2. Use the downloaded archive, a dedicated working directory, and isolated npm configuration. The verifier rejects any packed `publishConfig` (including registry/access/tag overrides). The explicit `@todoist` mapping below prevents user/project scope mappings from overriding the target; **`--registry` alone is insufficient**.
+The authorized maintainer uses Node 24 and npm 11.21.2. Before **every** publication, the shared publisher checks existing copies of the exact version in **both** required registries against the retained archive. Any different bytes, missing checksum, malformed response, or authentication/network error stops the operation before a package write. An existing matching copy is skipped; genuine absent copies may be published only to the selected destination. This applies even to an npm-only or GitHub-only retry and to the interactive bootstrap below.
+
+The bootstrap requires **two independent credentials**:
+
+-   npm: an authorized `todoist` scope maintainer logs in interactively and can complete fresh 2FA during publication.
+-   GitHub: supply a PAT (classic) as `NODE_AUTH_TOKEN`, with `read:packages`, the account's Read access to the intended existing/transferred package (including private mirrors), and any required organization SSO authorization. This read-only preflight token is not an npm credential. If the package truly does not exist, an administrator must first confirm absence in the intended namespace and the token's intended access. A 404 alone is not evidence of absence when package visibility or authorization is uncertain; stop and resolve that uncertainty. Never bypass preflight because the token or package access is missing.
+
+In Actions, `GITHUB_TOKEN` is provided for this same cross-registry preflight even for an npm-only destination. Confirm the publishing repository has Read access to an existing/transferred GitHub package in Manage Actions access; its GitHub publication also needs Write. Public npm metadata reads need no npm credentials. Explicit authentication failures and malformed/network responses fail closed.
+
+Run this from the reviewed checkout in a Bash terminal after downloading and verifying the original artifact. The helper creates temporary, isolated user/global npmrc files and a dedicated working directory; it explicitly maps `@todoist` to each registry and strips inherited npm configuration and GitHub tokens from the npm login/publish subprocesses. Login credentials stay in the temporary npm config for publication and are removed afterwards. Both login and **npm publish itself inherit the terminal**, so fresh publication 2FA can be completed. Metadata responses remain captured for checks. The packed `publishConfig` verifier and existing `latest` guard still apply.
 
 ```sh
-cd "$RELEASE_DIR"
-# Use a Bash release shell; discard inherited npm config/auth overrides.
-while IFS='=' read -r key _; do
-  case "$key" in npm_config_*|NPM_CONFIG_*|NPM_TOKEN|NODE_AUTH_TOKEN) unset "$key" ;; esac
-done < <(env)
-export NPM_CONFIG_USERCONFIG="$RELEASE_DIR/npm-user.npmrc"
-export NPM_CONFIG_GLOBALCONFIG="$RELEASE_DIR/npm-global.npmrc"
-: > "$NPM_CONFIG_GLOBALCONFIG"
-printf 'registry=https://registry.npmjs.org/\n@todoist:registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
-chmod 600 "$NPM_CONFIG_USERCONFIG"
-npm login --registry=https://registry.npmjs.org/
-npm config get @todoist:registry # must be https://registry.npmjs.org/
-npm publish "$RELEASE_DIR/todoist-prettier-config-4.0.2.tgz" \
-  --registry=https://registry.npmjs.org/ --access=public --tag=latest --ignore-scripts --provenance=false
-npm view @todoist/prettier-config@4.0.2 dist --json --registry=https://registry.npmjs.org/
+(
+set -e
+# Enter an authorized GitHub read:packages token without echoing or writing it to disk.
+IFS= read -r -s -p 'GitHub Packages read token: ' NODE_AUTH_TOKEN
+printf '\n'
+export NODE_AUTH_TOKEN
+node .github/scripts/release.mjs bootstrap "$RELEASE_DIR" "$RELEASE_SHA" 4.0.2 latest
+) # The token leaves scope even if bootstrap fails.
 ```
 
-Verify `dist.integrity` equals `release.json.integrity`. No placeholder, staged release, provenance claim for the local manual publish, or extra version is needed. Treat the login file as a secret, outside the repository and artifact backups; remove it when finished.
+The bootstrap logs in to npm, rechecks both registries, and publishes only a missing npm copy using the retained tarball, `--access=public --ignore-scripts --provenance=false` and the approved tag. Do not replace it with a raw `npm publish`: that would bypass the mandatory opposite-registry check. No placeholder, staged release, or extra version is needed. Do not run another publisher concurrently, including manual publication outside workflow concurrency control.
 
 Then dispatch **only the GitHub destination** using the original source run:
 
@@ -94,7 +96,7 @@ gh workflow run publish.yml --repo todoist/prettier-config --ref main \
   -f source_run_id="$PACK_RUN_ID" -f version=4.0.2 -f destination=github
 ```
 
-Approve the protected environment. This route neither calls npm publication nor assumes npm trust. It downloads the original tarball, checks its source against a successful same-repository `pack.yml` run on reviewed main history, validates packed identity/routing and checksums, and publishes only a missing version. A matching existing version is verified and skipped; different bytes or lookup errors stop the job. npm/GitHub config and credentials are separated in temporary directories. Set/verify the GitHub mirror's intended public visibility and repository grants independently.
+Approve the protected environment. This route neither calls npm publication nor assumes npm trust. It downloads the original tarball, checks its source against a successful same-repository `pack.yml` run on reviewed main history, validates packed identity/routing and checksums, and publishes only a missing version. Before the selected destination writes, matching copies in both registries are verified, different bytes or lookup errors in either registry stop the job, and an already completed matching destination is skipped. npm/GitHub config and credentials are separated in temporary directories. Set/verify the GitHub mirror's intended public visibility and repository grants independently.
 
 ## Later releases and recovery
 
@@ -105,9 +107,9 @@ gh workflow run publish.yml --repo todoist/prettier-config --ref main \
   -f source_run_id="$PACK_RUN_ID" -f version="$VERSION" -f destination=both
 ```
 
-Use `destination=npm` or `destination=github` with the **same run ID and version** for a missing mirror. Never bump versions, retag, rerun the pack job, or rebuild to recover a partial publish. `both` also skips matching completed destinations. An error after registry acceptance can be retried this way; the next lookup verifies it. The workflow serializes publications and never overwrites versions. The existing-version check does not move dist-tags. Before publishing a missing version under `latest`, the script rejects a newer current `latest` instead of downgrading it. For an older missing mirror, keep the same artifact/version and explicitly select `-f dist_tag=recovery` in the dispatch command; this publishes under the `recovery` tag and leaves `latest` untouched. Record the temporary recovery tag and verify both tags afterwards. The equivalent local script command ends with `github recovery` (or use `--tag=recovery` in the isolated interactive npm command). Never use the manual `--tag=latest` command for an older version. Removing an unneeded recovery tag is a separate maintainer action; OIDC dist-tag management would require its separate permission.
+Use `destination=npm` or `destination=github` with the **same run ID and version** for a missing mirror. Never bump versions, retag, rerun the pack job, or rebuild to recover a partial publish. `both` also skips matching completed destinations. An error after registry acceptance can be retried this way; the next lookup verifies it. The workflow serializes publications and never overwrites versions. The existing-version check does not move dist-tags. Before publishing a missing version under `latest`, the script rejects a newer current `latest` instead of downgrading it. For an older missing mirror, keep the same artifact/version and explicitly select `-f dist_tag=recovery` in the dispatch command; this publishes under the `recovery` tag and leaves `latest` untouched. Record the temporary recovery tag and verify both tags afterwards. The equivalent local script command ends with `github recovery` (or end the interactive `bootstrap` command with `recovery`). The bootstrap shares the same latest guard; never bypass it with a raw publication command. Removing an unneeded recovery tag is a separate maintainer action; OIDC dist-tag management would require its separate permission.
 
-If the Actions artifact has expired, use the backed-up original files. From the reviewed checkout, verify them again with `release.mjs verify`. The npm maintainer can use the isolated interactive npm procedure above for a missing npm copy. For a missing GitHub copy, export an authorized PAT (classic) as `NODE_AUTH_TOKEN` with `write:packages` and repository package rights, then run `node .github/scripts/release.mjs publish "$RELEASE_DIR" "$RELEASE_SHA" "$VERSION" github`. The script isolates registry config, verifies the same files, and skips an identical completed copy. Do not expose the token or change global npm configuration.
+If the Actions artifact has expired, use the backed-up original files. From the reviewed checkout, verify them again with `release.mjs verify`. The npm maintainer must use the `bootstrap` command above for a missing npm copy, with the same GitHub read token and two-registry preflight. For a missing GitHub copy, export an authorized PAT (classic) as `NODE_AUTH_TOKEN` with `read:packages` and `write:packages`, intended package Read/Write access, and any required SSO authorization, then run `node .github/scripts/release.mjs publish "$RELEASE_DIR" "$RELEASE_SHA" "$VERSION" github`. The script isolates registry config, verifies the same files and both registry copies before writing, and skips an identical completed copy. Do not expose the token or change global npm configuration.
 
 ## Consumer gate and safe source checks
 
