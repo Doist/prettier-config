@@ -4,7 +4,11 @@ on:
     workflow_dispatch:
         inputs:
             source_run_id:
-                description: Successful pack.yml run containing the reviewed tarball
+                description: Pack run whose first attempt succeeded (later reruns are ignored)
+                required: true
+                type: string
+            source_artifact_id:
+                description: Original retained artifact ID from that first pack attempt
                 required: true
                 type: string
             version:
@@ -50,41 +54,15 @@ jobs:
               with:
                   node-version: 24
             - run: npm install --global npm@11.21.2 --ignore-scripts
-            - name: Validate artifact source
+            - name: Fetch the original successful attempt artifact
               id: source
-              uses: actions/github-script@v7
               env:
                   SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
                   RELEASE_VERSION: ${{ inputs.version }}
-              with:
-                  script: |
-                      const runId = process.env.SOURCE_RUN_ID
-                      const version = process.env.RELEASE_VERSION
-                      if (!/^[1-9][0-9]*$/.test(runId) || !/^\d+\.\d+\.\d+$/.test(version)) {
-                          throw new Error('Expected a run ID and stable semver version')
-                      }
-                      const { data: run } = await github.rest.actions.getWorkflowRun({
-                          ...context.repo, run_id: Number(runId),
-                      })
-                      if (run.path !== '.github/workflows/pack.yml' || run.conclusion !== 'success' ||
-                          !['push', 'workflow_dispatch'].includes(run.event) ||
-                          run.head_repository.full_name !== context.payload.repository.full_name ||
-                          !['main', `v${version}`].includes(run.head_branch)) {
-                          throw new Error('Artifact must come from a successful main/version-tag pack.yml run in this repository')
-                      }
-                      const { data: comparison } = await github.rest.repos.compareCommits({
-                          ...context.repo, base: run.head_sha, head: 'main',
-                      })
-                      if (!['ahead', 'identical'].includes(comparison.status)) {
-                          throw new Error('Artifact commit must be on the reviewed main history')
-                      }
-                      core.setOutput('sha', run.head_sha)
-            - uses: actions/download-artifact@v4
-              with:
-                  name: prettier-config-${{ inputs.version }}
-                  path: ${{ runner.temp }}/prettier-config-release
-                  github-token: ${{ secrets.GITHUB_TOKEN }}
-                  run-id: ${{ inputs.source_run_id }}
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: node .github/scripts/source.mjs fetch "$RELEASE_DIR" "$RELEASE_VERSION"
             - name: Verify artifact before publication
               env:
                   RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
@@ -97,6 +75,9 @@ jobs:
                   RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
                   SOURCE_SHA: ${{ steps.source.outputs.sha }}
                   RELEASE_VERSION: ${{ inputs.version }}
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   RELEASE_TAG: ${{ inputs.dist_tag }}
                   # Read the GitHub mirror during preflight; isolated npm subprocesses strip it.
                   NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,5 +89,8 @@ jobs:
                   SOURCE_SHA: ${{ steps.source.outputs.sha }}
                   RELEASE_VERSION: ${{ inputs.version }}
                   NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   RELEASE_TAG: ${{ inputs.dist_tag }}
               run: node .github/scripts/release.mjs publish "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION" github "$RELEASE_TAG"

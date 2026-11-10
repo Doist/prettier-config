@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { verifySource } from './source.mjs'
 
 const packageName = '@todoist/prettier-config'
 const repository = 'https://github.com/todoist/prettier-config'
@@ -70,6 +71,12 @@ export function pack(directory, sourceSha, sourceRef) {
         assert.equal(entry.name, pkg.name)
         assert.equal(entry.version, pkg.version)
     }
+    if (process.env.GITHUB_RUN_ID)
+        assert.equal(
+            process.env.GITHUB_RUN_ATTEMPT,
+            '1',
+            'Only the original pack attempt may produce a release artifact',
+        )
     mkdirSync(directory, { recursive: true })
     const [packed] = JSON.parse(
         execFileSync(
@@ -79,6 +86,9 @@ export function pack(directory, sourceSha, sourceRef) {
         ),
     )
     const release = {
+        schema: 1,
+        sourceRunId: process.env.GITHUB_RUN_ID ?? null,
+        sourceRunAttempt: process.env.GITHUB_RUN_ID ? 1 : null,
         name: pkg.name,
         version: pkg.version,
         sourceSha,
@@ -171,10 +181,25 @@ export function preflight(release, lookup) {
     }
 }
 
-function lookupCopy(release, destination) {
-    return withRegistry(destination, (run, registry) =>
-        registryMetadata(run, registry, `${release.name}@${release.version}`),
-    )
+export function lookupCopy(release, destination, connect = withRegistry) {
+    return connect(destination, (run, registry) => {
+        if (destination === 'github') {
+            // This is a known transferred mirror. A version404 is meaningful only after
+            // reading actual registry metadata, not REST visibility or npm whoami.
+            const tags = registryMetadata(run, registry, release.name, 'dist-tags')
+            assert.ok(
+                tags &&
+                    Object.keys(tags).length > 0 &&
+                    Object.values(tags).every(
+                        (version) =>
+                            typeof version === 'string' &&
+                            /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/.test(version),
+                    ),
+                'GitHub package registry metadata is unreadable/ambiguous; restore known mirror Read access before publication',
+            )
+        }
+        return registryMetadata(run, registry, `${release.name}@${release.version}`)
+    })
 }
 
 export function publish(release, destination, run, registry, tag = 'latest', options = {}) {
@@ -237,10 +262,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else if (command === 'verify')
         console.log(JSON.stringify(verify(directory, sourceSha, versionOrRef), null, 2))
     else if (command === 'bootstrap') {
-        const release = verify(directory, sourceSha, versionOrRef)
+        const binding = await verifySource(directory, sourceSha, versionOrRef)
+        const release = { ...verify(directory, sourceSha, versionOrRef), ...binding }
         withRegistry('npm', (run, registry) => bootstrap(release, run, registry, destination))
     } else if (command === 'publish') {
-        const release = verify(directory, sourceSha, versionOrRef)
+        const binding = await verifySource(directory, sourceSha, versionOrRef)
+        const release = { ...verify(directory, sourceSha, versionOrRef), ...binding }
         withRegistry(destination, (run, registry) =>
             publish(release, destination, run, registry, tag),
         )

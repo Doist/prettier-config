@@ -11,7 +11,7 @@ permissions:
 
 jobs:
     pack:
-        if: github.repository == 'todoist/prettier-config' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        if: github.run_attempt == 1 && github.repository == 'todoist/prettier-config' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         runs-on: ubuntu-latest
         timeout-minutes: 10
         steps:
@@ -27,6 +27,7 @@ jobs:
               env:
                   RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
               run: |
+                  test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
                   node .github/scripts/release.mjs pack "$RELEASE_DIR" "$GITHUB_SHA" "$GITHUB_REF"
                   node -p "'version=' + require('./package.json').version" >> "$GITHUB_OUTPUT"
             - uses: actions/upload-artifact@v4
