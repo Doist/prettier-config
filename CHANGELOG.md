@@ -1,3 +1,8 @@
+## 4.0.2 (unreleased)
+
+-   Publish future releases as `@todoist/prettier-config`; preserve the existing configuration and Prettier peer range.
+-   Prepare one retained tarball for npm and GitHub Packages, including first-publication and exact-artifact retry paths.
+
 ## 4.0.0 (August 4, 2023)
 
 -   Updated `prettier` to `^3.0.0` [#21](https://github.com/Doist/prettier-config/pull/21)

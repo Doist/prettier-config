@@ -1,51 +1,110 @@
-name: Release @doist/prettier-config package
+name: Publish retained prettier-config artifact
 
 on:
-    push:
-        tags:
-            - 'v*'
+    workflow_dispatch:
+        inputs:
+            source_run_id:
+                description: Successful pack.yml run containing the reviewed tarball
+                required: true
+                type: string
+            version:
+                description: Exact stable version in the retained artifact (first release 4.0.2)
+                required: true
+                type: string
+            destination:
+                description: Use github after manual npm bootstrap; both for future OIDC releases
+                required: true
+                default: both
+                type: choice
+                options: [both, npm, github]
+            dist_tag:
+                description: Use recovery for an older missing version without moving latest
+                required: true
+                default: latest
+                type: choice
+                options: [latest, recovery]
 
 permissions:
-    # Enable reading repository contents (allows checkout without token)
     contents: read
-    # Enable the use of OIDC for trusted publishing and npm provenance
-    id-token: write
-    # Enable the use of GitHub Packages registry
-    packages: write
+
+concurrency:
+    group: prettier-config-publication
+    cancel-in-progress: false
 
 jobs:
     publish:
+        if: github.repository == 'todoist/prettier-config' && github.ref == 'refs/heads/main'
         runs-on: ubuntu-latest
-        timeout-minutes: 60
+        timeout-minutes: 15
+        environment: package-release
+        permissions:
+            contents: read
+            actions: read
+            id-token: write
+            packages: write
         steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Setup Node
-              uses: actions/setup-node@v3
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v4
               with:
                   node-version: 24
-
-            - name: Ensure npm 11.5.1 or later is installed
-              run: npm install -g npm@latest
-
-            - name: Publish to GitHub Package Registry
-              uses: actions/setup-node@v3
-              with:
-                  node-version: 24
-                  registry-url: https://npm.pkg.github.com/
-                  scope: '@doist'
-            - run: npm publish
+            - run: npm install --global npm@11.21.2 --ignore-scripts
+            - name: Validate artifact source
+              id: source
+              uses: actions/github-script@v7
               env:
-                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-            - name: Clear npm config between GitHub/npm registries
-              run: rm -f $NPM_CONFIG_USERCONFIG
-
-            - name: Publish to npm registry
-              uses: actions/setup-node@v3
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  RELEASE_VERSION: ${{ inputs.version }}
               with:
-                  node-version: 24
-                  registry-url: https://registry.npmjs.org/
-                  scope: '@doist'
-            - run: npm publish --provenance --access public
+                  script: |
+                      const runId = process.env.SOURCE_RUN_ID
+                      const version = process.env.RELEASE_VERSION
+                      if (!/^[1-9][0-9]*$/.test(runId) || !/^\d+\.\d+\.\d+$/.test(version)) {
+                          throw new Error('Expected a run ID and stable semver version')
+                      }
+                      const { data: run } = await github.rest.actions.getWorkflowRun({
+                          ...context.repo, run_id: Number(runId),
+                      })
+                      if (run.path !== '.github/workflows/pack.yml' || run.conclusion !== 'success' ||
+                          !['push', 'workflow_dispatch'].includes(run.event) ||
+                          run.head_repository.full_name !== context.payload.repository.full_name ||
+                          !['main', `v${version}`].includes(run.head_branch)) {
+                          throw new Error('Artifact must come from a successful main/version-tag pack.yml run in this repository')
+                      }
+                      const { data: comparison } = await github.rest.repos.compareCommits({
+                          ...context.repo, base: run.head_sha, head: 'main',
+                      })
+                      if (!['ahead', 'identical'].includes(comparison.status)) {
+                          throw new Error('Artifact commit must be on the reviewed main history')
+                      }
+                      core.setOutput('sha', run.head_sha)
+            - uses: actions/download-artifact@v4
+              with:
+                  name: prettier-config-${{ inputs.version }}
+                  path: ${{ runner.temp }}/prettier-config-release
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  run-id: ${{ inputs.source_run_id }}
+            - name: Verify artifact before publication
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+              run: node .github/scripts/release.mjs verify "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION"
+            - name: Publish or verify npm copy through OIDC
+              if: inputs.destination == 'both' || inputs.destination == 'npm'
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+                  RELEASE_TAG: ${{ inputs.dist_tag }}
+              run: node .github/scripts/release.mjs publish "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION" npm "$RELEASE_TAG"
+            - name: Publish or verify GitHub copy
+              if: inputs.destination == 'both' || inputs.destination == 'github'
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.dist_tag }}
+              run: node .github/scripts/release.mjs publish "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION" github "$RELEASE_TAG"

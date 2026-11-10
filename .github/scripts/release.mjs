@@ -1,0 +1,213 @@
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const packageName = '@todoist/prettier-config'
+const repository = 'https://github.com/todoist/prettier-config'
+const registries = { npm: 'https://registry.npmjs.org/', github: 'https://npm.pkg.github.com/' }
+const json = (path) => JSON.parse(readFileSync(path, 'utf8'))
+const hash = (bytes, algorithm, encoding) => createHash(algorithm).update(bytes).digest(encoding)
+
+function validatePackage(pkg, version) {
+    assert.match(version, /^\d+\.\d+\.\d+$/, 'Only stable semver releases are supported')
+    assert.equal(pkg.name, packageName)
+    assert.equal(pkg.version, version)
+    assert.equal(pkg.repository, repository)
+    assert.ok(!pkg.private, 'The npm package must remain public')
+    assert.equal(pkg.publishConfig, undefined, 'Packed publishConfig must not override routing')
+    assert.equal(pkg.scripts, undefined, 'This leaf package needs no lifecycle scripts')
+    for (const key of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+        assert.equal(Object.keys(pkg[key] ?? {}).length, 0, `Unexpected ${key}`)
+    }
+    assert.deepEqual(pkg.peerDependencies, { prettier: '^3.0.0' })
+    assert.equal(pkg.main, 'index.json')
+}
+
+export function verify(directory, sourceSha, version) {
+    assert.match(version, /^\d+\.\d+\.\d+$/, 'Only stable semver releases are supported')
+    assert.match(sourceSha, /^[a-f0-9]{40}$/)
+    const release = json(join(directory, 'release.json'))
+    assert.equal(release.name, packageName)
+    assert.equal(release.version, version)
+    assert.equal(release.sourceSha, sourceSha)
+    assert.equal(release.filename, `todoist-prettier-config-${version}.tgz`)
+    const tarball = resolve(directory, release.filename)
+    const bytes = readFileSync(tarball)
+    assert.equal(release.integrity, `sha512-${hash(bytes, 'sha512', 'base64')}`)
+    assert.equal(release.shasum, hash(bytes, 'sha1', 'hex'))
+    const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split('\n')
+    assert.deepEqual(
+        files.sort(),
+        [
+            'package/CHANGELOG.md',
+            'package/README.md',
+            'package/index.json',
+            'package/package.json',
+        ].sort(),
+        'Unexpected packed files',
+    )
+    const pkg = JSON.parse(
+        execFileSync('tar', ['-xOzf', tarball, 'package/package.json'], { encoding: 'utf8' }),
+    )
+    validatePackage(pkg, version)
+    return { ...release, tarball }
+}
+
+export function pack(directory, sourceSha, sourceRef) {
+    const pkg = json('package.json')
+    validatePackage(pkg, pkg.version)
+    assert.match(sourceSha, /^[a-f0-9]{40}$/)
+    assert.ok(
+        sourceRef === 'refs/heads/main' || sourceRef === `refs/tags/v${pkg.version}`,
+        'Use main or the matching version tag',
+    )
+    const lock = json('package-lock.json')
+    for (const entry of [lock, lock.packages['']]) {
+        assert.equal(entry.name, pkg.name)
+        assert.equal(entry.version, pkg.version)
+    }
+    mkdirSync(directory, { recursive: true })
+    const [packed] = JSON.parse(
+        execFileSync(
+            'npm',
+            ['pack', '--ignore-scripts', '--json', '--pack-destination', resolve(directory)],
+            { encoding: 'utf8' },
+        ),
+    )
+    const release = {
+        name: pkg.name,
+        version: pkg.version,
+        sourceSha,
+        sourceRef,
+        filename: packed.filename,
+        integrity: packed.integrity,
+        shasum: packed.shasum,
+    }
+    writeFileSync(join(directory, 'release.json'), `${JSON.stringify(release, null, 2)}\n`)
+    verify(directory, sourceSha, pkg.version)
+    return release
+}
+
+// A temporary cwd and explicit scope mapping prevent project/user npmrc routing leaks.
+// Never log config contents or token values. npm uses OIDC for npmjs, GITHUB_TOKEN for GitHub.
+export function withRegistry(destination, callback) {
+    assert.ok(Object.hasOwn(registries, destination), 'Unknown registry')
+    if (destination === 'github')
+        assert.ok(process.env.NODE_AUTH_TOKEN, 'GitHub package token is required')
+    const registry = registries[destination]
+    const directory = mkdtempSync(join(tmpdir(), 'prettier-config-publish-'))
+    const env = Object.fromEntries(
+        Object.entries(process.env).filter(
+            ([key]) => !/^(npm_config_|npm_token$|node_auth_token$)/i.test(key),
+        ),
+    )
+    env.NPM_CONFIG_USERCONFIG = join(directory, 'user.npmrc')
+    env.NPM_CONFIG_GLOBALCONFIG = join(directory, 'global.npmrc')
+    writeFileSync(env.NPM_CONFIG_GLOBALCONFIG, '')
+    let config = `registry=${registry}\n@todoist:registry=${registry}\n`
+    if (destination === 'github') {
+        env.NODE_AUTH_TOKEN = process.env.NODE_AUTH_TOKEN
+        config += '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\n'
+    }
+    writeFileSync(env.NPM_CONFIG_USERCONFIG, config, { mode: 0o600 })
+    try {
+        return callback(
+            (args) => spawnSync('npm', args, { cwd: directory, env, encoding: 'utf8' }),
+            registry,
+        )
+    } finally {
+        rmSync(directory, { recursive: true, force: true })
+    }
+}
+
+export function registryMetadata(run, registry, spec, field = 'dist') {
+    const result = run(['view', spec, field, '--json', `--registry=${registry}`])
+    if (result.status === 0) return JSON.parse(result.stdout)
+    // Authentication, networking and other failures must not be mistaken for absence.
+    let error
+    try {
+        error = JSON.parse(result.stdout).error
+    } catch {
+        /* fail closed below */
+    }
+    if (error?.code === 'E404') return null
+    throw new Error(`Registry lookup failed: ${result.stderr || result.error || result.stdout}`)
+}
+
+export function assertSameArtifact(dist, release) {
+    assert.ok(dist, 'Published version is missing')
+    if (dist.integrity)
+        assert.equal(
+            dist.integrity,
+            release.integrity,
+            'Registry integrity differs; do not overwrite or bump',
+        )
+    else
+        assert.equal(
+            dist.shasum,
+            release.shasum,
+            'Registry checksum differs; do not overwrite or bump',
+        )
+}
+
+export function publish(release, destination, run, registry, tag = 'latest') {
+    assert.ok(['latest', 'recovery'].includes(tag), 'Expected latest or recovery dist-tag')
+    const spec = `${release.name}@${release.version}`
+    const existing = registryMetadata(run, registry, spec)
+    if (existing) {
+        assertSameArtifact(existing, release)
+        console.log(`${destination}: identical ${spec} already exists; skipped`)
+        return
+    }
+    if (tag === 'latest') {
+        const latest = registryMetadata(run, registry, release.name, 'dist-tags')?.latest
+        if (latest) {
+            assert.match(
+                latest,
+                /^\d+\.\d+\.\d+$/,
+                'Non-stable latest requires explicit recovery tag',
+            )
+            const current = latest.split('.').map(Number)
+            const target = release.version.split('.').map(Number)
+            const firstDifference = current.findIndex((part, index) => part !== target[index])
+            assert.ok(
+                firstDifference === -1 || current[firstDifference] < target[firstDifference],
+                `Registry latest ${latest} is newer than ${release.version}; use recovery tag to preserve latest`,
+            )
+        }
+    }
+    const args = [
+        'publish',
+        release.tarball,
+        '--ignore-scripts',
+        `--tag=${tag}`,
+        `--registry=${registry}`,
+    ]
+    // GitHub visibility is administered independently; do not infer it from npm access.
+    // The tarball comes from an earlier run; GITHUB_SHA would attest the publisher commit.
+    // Disable even OIDC's automatic provenance rather than claim the wrong build source.
+    if (destination === 'npm') args.push('--access=public', '--provenance=false')
+    const result = run(args)
+    if (result.status !== 0)
+        throw new Error(`Publish failed: ${result.stderr || result.error || result.stdout}`)
+    assertSameArtifact(registryMetadata(run, registry, spec), release)
+    console.log(`${destination}: verified ${spec}`)
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    const [command, directory, sourceSha, versionOrRef, destination, tag] = process.argv.slice(2)
+    if (command === 'pack')
+        console.log(JSON.stringify(pack(directory, sourceSha, versionOrRef), null, 2))
+    else if (command === 'verify')
+        console.log(JSON.stringify(verify(directory, sourceSha, versionOrRef), null, 2))
+    else if (command === 'publish') {
+        const release = verify(directory, sourceSha, versionOrRef)
+        withRegistry(destination, (run, registry) =>
+            publish(release, destination, run, registry, tag),
+        )
+    } else throw new Error('Expected pack, verify or publish')
+}
