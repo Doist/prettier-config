@@ -1,0 +1,38 @@
+name: Pack prettier-config release (no publication)
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    pack:
+        if: github.run_attempt == 1 && github.repository == 'todoist/prettier-config' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+            - run: npm install --global npm@11.21.2 --ignore-scripts
+            - name: Pack once without installing dependencies or running lifecycles
+              id: package
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+              run: |
+                  test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+                  node .github/scripts/release.mjs pack "$RELEASE_DIR" "$GITHUB_SHA" "$GITHUB_REF"
+                  node -p "'version=' + require('./package.json').version" >> "$GITHUB_OUTPUT"
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: prettier-config-${{ steps.package.outputs.version }}
+                  path: ${{ runner.temp }}/prettier-config-release/
+                  if-no-files-found: error
+                  retention-days: 90

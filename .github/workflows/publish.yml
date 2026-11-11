@@ -1,51 +1,96 @@
-name: Release @doist/prettier-config package
+name: Publish retained prettier-config artifact
 
 on:
-    push:
-        tags:
-            - 'v*'
+    workflow_dispatch:
+        inputs:
+            source_run_id:
+                description: Pack run whose first attempt succeeded (later reruns are ignored)
+                required: true
+                type: string
+            source_artifact_id:
+                description: Original retained artifact ID from that first pack attempt
+                required: true
+                type: string
+            version:
+                description: Exact stable version in the retained artifact (first release 4.0.2)
+                required: true
+                type: string
+            destination:
+                description: Use github after manual npm bootstrap; both for future OIDC releases
+                required: true
+                default: both
+                type: choice
+                options: [both, npm, github]
+            dist_tag:
+                description: Use recovery for an older missing version without moving latest
+                required: true
+                default: latest
+                type: choice
+                options: [latest, recovery]
 
 permissions:
-    # Enable reading repository contents (allows checkout without token)
     contents: read
-    # Enable the use of OIDC for trusted publishing and npm provenance
-    id-token: write
-    # Enable the use of GitHub Packages registry
-    packages: write
+
+concurrency:
+    group: prettier-config-publication
+    cancel-in-progress: false
 
 jobs:
     publish:
+        if: github.repository == 'todoist/prettier-config' && github.ref == 'refs/heads/main'
         runs-on: ubuntu-latest
-        timeout-minutes: 60
+        timeout-minutes: 15
+        environment: package-release
+        permissions:
+            contents: read
+            actions: read
+            id-token: write
+            packages: write
         steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Setup Node
-              uses: actions/setup-node@v3
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v4
               with:
                   node-version: 24
-
-            - name: Ensure npm 11.5.1 or later is installed
-              run: npm install -g npm@latest
-
-            - name: Publish to GitHub Package Registry
-              uses: actions/setup-node@v3
-              with:
-                  node-version: 24
-                  registry-url: https://npm.pkg.github.com/
-                  scope: '@doist'
-            - run: npm publish
+            - run: npm install --global npm@11.21.2 --ignore-scripts
+            - name: Fetch the original successful attempt artifact
+              id: source
               env:
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: node .github/scripts/source.mjs fetch "$RELEASE_DIR" "$RELEASE_VERSION"
+            - name: Verify artifact before publication
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+              run: node .github/scripts/release.mjs verify "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION"
+            - name: Preflight both registries and publish or verify npm copy through OIDC
+              if: inputs.destination == 'both' || inputs.destination == 'npm'
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.dist_tag }}
+                  # Read the GitHub mirror during preflight; isolated npm subprocesses strip it.
                   NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-            - name: Clear npm config between GitHub/npm registries
-              run: rm -f $NPM_CONFIG_USERCONFIG
-
-            - name: Publish to npm registry
-              uses: actions/setup-node@v3
-              with:
-                  node-version: 24
-                  registry-url: https://registry.npmjs.org/
-                  scope: '@doist'
-            - run: npm publish --provenance --access public
+              run: node .github/scripts/release.mjs publish "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION" npm "$RELEASE_TAG"
+            - name: Preflight both registries and publish or verify GitHub copy
+              if: inputs.destination == 'both' || inputs.destination == 'github'
+              env:
+                  RELEASE_DIR: ${{ runner.temp }}/prettier-config-release
+                  SOURCE_SHA: ${{ steps.source.outputs.sha }}
+                  RELEASE_VERSION: ${{ inputs.version }}
+                  NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+                  SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  RELEASE_TAG: ${{ inputs.dist_tag }}
+              run: node .github/scripts/release.mjs publish "$RELEASE_DIR" "$SOURCE_SHA" "$RELEASE_VERSION" github "$RELEASE_TAG"
