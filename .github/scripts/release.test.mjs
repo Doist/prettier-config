@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, appendFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, appendFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
+import { once } from 'node:events'
 import {
     pack,
     verify,
@@ -10,6 +13,8 @@ import {
     bootstrap,
     registryMetadata,
     withRegistry,
+    lookupCopy,
+    ownerConfirmedAbsence,
 } from './release.mjs'
 
 const registry = 'https://registry.npmjs.org/'
@@ -329,7 +334,7 @@ test('interactive bootstrap preflights both copies after login and preserves pub
 })
 
 test('cross-registry GitHub credentials are stripped from npm login and publication', () => {
-    const keys = ['NODE_AUTH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN']
+    const keys = ['NODE_AUTH_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_PACKAGES_TOKEN']
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => {
         process.env[key] = `mock-${key}`
@@ -360,5 +365,200 @@ test('cross-registry GitHub credentials are stripped from npm login and publicat
             if (previous[index] === undefined) delete process.env[key]
             else process.env[key] = previous[index]
         })
+    }
+})
+
+test('registry errors support either JSON stream and reject contradictory errors', () => {
+    assert.equal(
+        registryMetadata(
+            () => ({ status: 1, stdout: '', stderr: missing.stdout }),
+            registry,
+            'pkg@1.0.0',
+        ),
+        null,
+    )
+    assert.throws(
+        () =>
+            registryMetadata(
+                () => ({ ...missing, stderr: JSON.stringify({ error: { code: 'E401' } }) }),
+                registry,
+                'pkg@1.0.0',
+            ),
+        /lookup failed/,
+    )
+})
+
+test('recovery-only package tags are read without resolving latest', () => {
+    const tags = { recovery: '4.0.1' }
+    for (const value of [tags, [tags, tags]]) {
+        const actual = registryMetadata(
+            (args) => {
+                assert.equal(args[1], `${release.name}@>=0`)
+                assert.equal(args[2], 'dist-tags')
+                return success(value)
+            },
+            registry,
+            release.name,
+            'dist-tags',
+        )
+        assert.deepEqual(actual, tags)
+    }
+    assert.throws(
+        () =>
+            registryMetadata(
+                () => success([tags, { latest: '4.0.2' }]),
+                registry,
+                release.name,
+                'dist-tags',
+            ),
+        /Inconsistent/,
+    )
+})
+
+test('local first namespace requires exact artifact and destination confirmation before writes', () => {
+    const bound = {
+        ...release,
+        sourceRunId: '123',
+        sourceArtifactId: '456',
+        sourceArchiveDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const previous = process.env.CONFIRMED_ABSENT_GITHUB_PACKAGE
+    const previousActions = process.env.GITHUB_ACTIONS
+    try {
+        delete process.env.GITHUB_ACTIONS
+        for (const destination of ['npm', 'github']) {
+            const confirmation = `${bound.name}@${bound.version}:${destination}:123:456:${bound.sourceArchiveDigest}`
+            for (const scenario of [
+                'confirmed',
+                'unconfirmed',
+                'wrong-artifact',
+                'actions',
+                'unauthorized',
+                'timeout',
+                'malformed',
+                'contradiction',
+                'different-bytes',
+            ]) {
+                delete process.env.CONFIRMED_ABSENT_GITHUB_PACKAGE
+                delete process.env.GITHUB_ACTIONS
+                if (scenario !== 'unconfirmed')
+                    process.env.CONFIRMED_ABSENT_GITHUB_PACKAGE =
+                        scenario === 'wrong-artifact'
+                            ? confirmation.replace(':456:', ':457:')
+                            : confirmation
+                if (scenario === 'actions') process.env.GITHUB_ACTIONS = 'true'
+                const writes = []
+                const results = [missing, missing, success({}), success(bound)]
+                const attempt = () =>
+                    guardedPublish(
+                        bound,
+                        destination,
+                        (args) => {
+                            if (args[0] === 'publish') writes.push(args)
+                            return results.shift()
+                        },
+                        registry,
+                        'latest',
+                        {
+                            lookup: (target) =>
+                                target === 'npm'
+                                    ? null
+                                    : lookupCopy(
+                                          bound,
+                                          target,
+                                          (_target, callback) =>
+                                              callback((args) => {
+                                                  if (args[0] === 'whoami')
+                                                      return scenario === 'unauthorized'
+                                                          ? { status: 1, stdout: '' }
+                                                          : success('owner')
+                                                  if (args[2] === 'dist-tags') {
+                                                      if (scenario === 'timeout')
+                                                          return {
+                                                              status: 1,
+                                                              stdout: '',
+                                                              stderr: 'ETIMEDOUT',
+                                                          }
+                                                      if (scenario === 'malformed')
+                                                          return success(null)
+                                                      if (scenario === 'different-bytes')
+                                                          return success({ latest: '4.0.1' })
+                                                      return missing
+                                                  }
+                                                  return [
+                                                      'contradiction',
+                                                      'different-bytes',
+                                                  ].includes(scenario)
+                                                      ? success({ integrity: 'sha512-other' })
+                                                      : missing
+                                              }, 'https://npm.pkg.github.com/'),
+                                          ownerConfirmedAbsence(bound, destination),
+                                      ),
+                        },
+                    )
+                if (scenario === 'confirmed') {
+                    attempt()
+                    assert.equal(writes.length, 1)
+                    assert.equal(writes[0][1], bound.tarball)
+                } else {
+                    assert.throws(attempt, undefined, scenario)
+                    assert.equal(writes.length, 0, scenario)
+                }
+            }
+        }
+    } finally {
+        if (previous === undefined) delete process.env.CONFIRMED_ABSENT_GITHUB_PACKAGE
+        else process.env.CONFIRMED_ABSENT_GITHUB_PACKAGE = previous
+        if (previousActions === undefined) delete process.env.GITHUB_ACTIONS
+        else process.env.GITHUB_ACTIONS = previousActions
+    }
+})
+
+test('actual npm reads recovery-only tags from a local mock registry', async () => {
+    const server = new Worker(
+        `
+        const { parentPort } = require('node:worker_threads')
+        const { createServer } = require('node:http')
+        const document = {
+            name: '@todoist/prettier-config',
+            'dist-tags': { recovery: '4.0.1' },
+            versions: { '4.0.1': { name: '@todoist/prettier-config', version: '4.0.1' } }
+        }
+        const server = createServer((request, response) => {
+            if (request.method !== 'GET') { response.writeHead(405); response.end(); return }
+            response.setHeader('content-type', 'application/json')
+            response.end(JSON.stringify(document))
+        })
+        server.listen(0, '127.0.0.1', () => parentPort.postMessage(server.address().port))
+    `,
+        { eval: true },
+    )
+    const directory = mkdtempSync(join(tmpdir(), 'prettier-config-registry-test-'))
+    try {
+        const [port] = await once(server, 'message')
+        const mockRegistry = `http://127.0.0.1:${port}/`
+        const config = join(directory, 'user.npmrc')
+        const globalConfig = join(directory, 'global.npmrc')
+        writeFileSync(config, `registry=${mockRegistry}\n@todoist:registry=${mockRegistry}\n`)
+        writeFileSync(globalConfig, '')
+        const env = Object.fromEntries(
+            Object.entries(process.env).filter(([key]) => !/token|^npm_config_/i.test(key)),
+        )
+        Object.assign(env, {
+            NPM_CONFIG_USERCONFIG: config,
+            NPM_CONFIG_GLOBALCONFIG: globalConfig,
+            NPM_CONFIG_CACHE: join(directory, 'cache'),
+        })
+        const tags = registryMetadata(
+            (args) =>
+                spawnSync('npm', args, { cwd: directory, env, encoding: 'utf8', timeout: 15000 }),
+            mockRegistry,
+            release.name,
+            'dist-tags',
+        )
+        assert.deepEqual(tags, { recovery: '4.0.1' })
+    } finally {
+        await server.terminate()
+        rmSync(directory, { recursive: true, force: true })
     }
 })

@@ -80,7 +80,7 @@ The authorized maintainer uses Node 24 and npm 11.21.2. Before **every** publica
 The bootstrap requires independent npm, GitHub Packages, and source-API authentication:
 
 -   npm: an authorized `todoist` scope maintainer logs in interactively and can complete fresh 2FA during publication.
--   GitHub Packages: supply a PAT (classic) as `NODE_AUTH_TOKEN`, with `read:packages`, the account's Read access to the known transferred package (including private mirrors), and any required organization SSO authorization. Before treating an exact-version 404 as absent, the helper must read well-formed, nonempty package dist-tags from the **GitHub npm registry itself**. A package-root 404 or malformed metadata stops every destination before writing. REST visibility, npm whoami and documentation-only confirmation cannot bypass this gate. Restore the known mirror's registry readability; there is no first-mirror absence override.
+-   GitHub Packages: supply a PAT (classic) as `NODE_AUTH_TOKEN`, with `read:packages`, the account's Read access to the known transferred package (including private mirrors), and any required organization SSO authorization. Before treating an exact-version 404 as absent, the helper must read well-formed, nonempty package dist-tags from the **GitHub npm registry itself**. A package-root 404 or malformed metadata stops every destination before writing. REST visibility, npm whoami and documentation-only confirmation cannot bypass this gate. Restore the known mirror's registry readability. The only exception is the explicit, local, artifact-bound first-namespace operation below; ordinary workflow retries have no absence override.
 -   Source API: provide `GH_TOKEN` with Actions:read and Contents:read for the repository, plus `SOURCE_RUN_ID` and `SOURCE_ARTIFACT_ID` naming the original retained archive. Both workflow and local publication independently revalidate it before any package write. A single classic token with all required rights can serve both GitHub purposes, but npm subprocesses receive neither GitHub credential.
 
 In Actions, `GITHUB_TOKEN` is provided for this same cross-registry preflight even for an npm-only destination. Confirm the publishing repository has Read access to an existing/transferred GitHub package in Manage Actions access; its GitHub publication also needs Write. Public npm metadata reads need no npm credentials. Explicit authentication failures and malformed/network responses fail closed.
@@ -102,6 +102,26 @@ node .github/scripts/release.mjs bootstrap "$RELEASE_DIR" "$RELEASE_SHA" 4.0.2 l
 ```
 
 The bootstrap logs in to npm, rechecks both registries, and publishes only a missing npm copy using the retained tarball, `--access=public --ignore-scripts --provenance=false` and the approved tag. Do not replace it with a raw `npm publish`: that would bypass the mandatory opposite-registry check. No placeholder, staged release, or extra version is needed. Do not run another publisher concurrently, including manual publication outside workflow concurrency control.
+
+### When the old GitHub namespace did not transfer
+
+A repository transfer can leave `@doist/prettier-config` readable while `@todoist/prettier-config` does not yet exist. A new-scope 404 alone is ambiguous. Before any first-namespace write, obtain an explicit organization/package owner confirmation that the new GitHub package is absent for this exact retained run, artifact ID and archive digest. Record the owner and confirmation with the release evidence; do not infer it from a filtered inventory, REST 404 or successful whoami.
+
+Only for that approved local operation, set the following value in the bootstrap subshell (all IDs and the SHA-256 digest come from the authoritative source helper):
+
+```sh
+export CONFIRMED_ABSENT_GITHUB_PACKAGE="@todoist/prettier-config@4.0.2:npm:$PACK_RUN_ID:$PACK_ARTIFACT_ID:$ARCHIVE_DIGEST"
+# Run the bootstrap command above with the same source IDs and credentials.
+```
+
+For the first GitHub mirror, use a separate local operation authorized by the same owner for the same original bytes. Set the confirmation destination to `github`, provide a classic PAT with `read:packages` and `write:packages` plus actual organization/package access as `NODE_AUTH_TOKEN`, and retain the source API token and IDs:
+
+```sh
+export CONFIRMED_ABSENT_GITHUB_PACKAGE="@todoist/prettier-config@4.0.2:github:$PACK_RUN_ID:$PACK_ARTIFACT_ID:$ARCHIVE_DIGEST"
+node .github/scripts/release.mjs publish "$RELEASE_DIR" "$RELEASE_SHA" 4.0.2 github latest
+```
+
+The helper rejects this confirmation in Actions or for a different destination/archive, requires successful registry authentication, and still checks both exact-version copies before every write. Malformed metadata, auth/network errors, contradictory root/version evidence and differing existing bytes stop publication. Once the new mirror exists, its registry metadata must be readable and every matching copy must agree; the confirmation never permits overriding an existing version. Unset the confirmation afterwards. Preserve the old namespace and independently set/verify the new GitHub mirror **public**; npm public access does not set GitHub visibility. Local publication does not require configuring the future protected environment or npm OIDC first.
 
 Then dispatch **only the GitHub destination** using the original source run:
 

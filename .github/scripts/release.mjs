@@ -113,7 +113,9 @@ export function withRegistry(destination, callback, spawn = spawnSync) {
     const env = Object.fromEntries(
         Object.entries(process.env).filter(
             ([key]) =>
-                !/^(npm_config_|npm_token$|node_auth_token$|github_token$|gh_token$)/i.test(key),
+                !/^(npm_config_|npm_token$|node_auth_token$|github_token$|gh_token$|gh_packages_token$|confirmed_absent_github_package$)/i.test(
+                    key,
+                ),
         ),
     )
     env.NPM_CONFIG_USERCONFIG = join(directory, 'user.npmrc')
@@ -137,9 +139,21 @@ export function withRegistry(destination, callback, spawn = spawnSync) {
 }
 
 export function registryMetadata(run, registry, spec, field = 'dist') {
-    const result = run(['view', spec, field, '--json', `--registry=${registry}`])
+    // An explicit range reads tags without resolving latest (npm treats bare * as latest).
+    const result = run([
+        'view',
+        field === 'dist-tags' ? `${spec}@>=0` : spec,
+        field,
+        '--json',
+        `--registry=${registry}`,
+    ])
     if (result.status === 0) {
-        const value = JSON.parse(result.stdout)
+        let value = JSON.parse(result.stdout)
+        if (field === 'dist-tags' && Array.isArray(value)) {
+            assert.ok(value.length > 0, 'Ambiguous registry metadata')
+            for (const tags of value) assert.deepEqual(tags, value[0], 'Inconsistent registry tags')
+            value = value[0]
+        }
         assert.ok(
             value && typeof value === 'object' && !Array.isArray(value),
             'Ambiguous registry metadata',
@@ -147,13 +161,16 @@ export function registryMetadata(run, registry, spec, field = 'dist') {
         return value
     }
     // Authentication, networking and other failures must not be mistaken for absence.
-    let error
-    try {
-        error = JSON.parse(result.stdout).error
-    } catch {
-        /* fail closed below */
+    const errors = []
+    for (const stream of [result.stdout, result.stderr]) {
+        try {
+            const error = JSON.parse(stream).error
+            if (error) errors.push(error)
+        } catch {
+            /* npm can emit non-JSON diagnostics alongside its structured error */
+        }
     }
-    if (error?.code === 'E404') return null
+    if (errors.length && errors.every((error) => error.code === 'E404')) return null
     throw new Error(`Registry lookup failed: ${result.stderr || result.error || result.stdout}`)
 }
 
@@ -181,12 +198,42 @@ export function preflight(release, lookup) {
     }
 }
 
-export function lookupCopy(release, destination, connect = withRegistry) {
+export function ownerConfirmedAbsence(release, destination, env = process.env) {
+    const confirmation = env.CONFIRMED_ABSENT_GITHUB_PACKAGE
+    if (!confirmation) return false
+    assert.notEqual(env.GITHUB_ACTIONS, 'true', 'First namespace confirmation is local only')
+    assert.ok(['npm', 'github'].includes(destination))
+    assert.match(release.sourceRunId ?? '', /^[1-9]\d*$/)
+    assert.match(release.sourceArtifactId ?? '', /^[1-9]\d*$/)
+    assert.match(release.sourceArchiveDigest ?? '', /^sha256:[a-f0-9]{64}$/)
+    assert.equal(
+        confirmation,
+        `${release.name}@${release.version}:${destination}:${release.sourceRunId}:${release.sourceArtifactId}:${release.sourceArchiveDigest}`,
+        'Owner absence confirmation must bind this destination and authoritative original artifact',
+    )
+    return true
+}
+
+export function lookupCopy(release, destination, connect = withRegistry, confirmedAbsent = false) {
     return connect(destination, (run, registry) => {
         if (destination === 'github') {
-            // This is a known transferred mirror. A version404 is meaningful only after
-            // reading actual registry metadata, not REST visibility or npm whoami.
+            // Normal retries require registry readability. The old @doist package can stay
+            // behind during a repository transfer; only an owner-confirmed local first
+            // namespace operation may interpret the new package's root404 as absence.
             const tags = registryMetadata(run, registry, release.name, 'dist-tags')
+            if (tags === null && confirmedAbsent) {
+                const identity = run(['whoami', '--json', `--registry=${registry}`])
+                assert.equal(identity.status, 0, 'GitHub package credentials must authenticate')
+                const username = JSON.parse(identity.stdout)
+                assert.ok(typeof username === 'string' && username.length > 0)
+                const existing = registryMetadata(
+                    run,
+                    registry,
+                    `${release.name}@${release.version}`,
+                )
+                assert.equal(existing, null, 'Contradictory GitHub absence evidence')
+                return null
+            }
             assert.ok(
                 tags &&
                     Object.keys(tags).length > 0 &&
@@ -204,7 +251,11 @@ export function lookupCopy(release, destination, connect = withRegistry) {
 
 export function publish(release, destination, run, registry, tag = 'latest', options = {}) {
     assert.ok(['latest', 'recovery'].includes(tag), 'Expected latest or recovery dist-tag')
-    preflight(release, options.lookup ?? ((target) => lookupCopy(release, target)))
+    const confirmedAbsent = ownerConfirmedAbsence(release, destination)
+    preflight(
+        release,
+        options.lookup ?? ((target) => lookupCopy(release, target, withRegistry, confirmedAbsent)),
+    )
     const spec = `${release.name}@${release.version}`
     const existing = registryMetadata(run, registry, spec)
     if (existing) {
